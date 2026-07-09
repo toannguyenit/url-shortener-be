@@ -1,0 +1,72 @@
+# URL Shortener — Infrastructure (riêng biệt, không share với dự án khác)
+# Chạy: docker compose -f infra/docker-compose.yml up -d
+# Network: urlshortener-net (các dự án portfolio khác dùng network riêng: blog-net, shop-net...)
+
+name: urlshortener-infra
+
+services:
+  mongodb:
+    image: mongo:7
+    container_name: urlshortener-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-urlshortener}
+    volumes:
+      - urlshortener-mongodata:/data/db
+    networks:
+      - urlshortener-net
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Không publish port ra host — chỉ app trong urlshortener-net truy cập được
+
+  redis:
+    image: redis:7-alpine
+    container_name: urlshortener-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - urlshortener-redisdata:/data
+    networks:
+      - urlshortener-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: urlshortener-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-urlshortener}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-changeme}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_VHOST:-urlshortener}
+    volumes:
+      - urlshortener-rabbitmqdata:/var/lib/rabbitmq
+    networks:
+      - urlshortener-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    # Management UI chỉ bind localhost (SSH tunnel khi cần debug)
+    ports:
+      - "127.0.0.1:15672:15672"
+
+volumes:
+  urlshortener-mongodata:
+    name: urlshortener-mongodata
+  urlshortener-redisdata:
+    name: urlshortener-redisdata
+  urlshortener-rabbitmqdata:
+    name: urlshortener-rabbitmqdata
+
+networks:
+  urlshortener-net:
+    name: urlshortener-net
+    driver: bridge

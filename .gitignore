@@ -1,0 +1,18 @@
+# Maven
+target/
+!.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.class
+
+# OS
+.DS_Store
+
+# GeoIP data (download separately)
+data/geoip/*.mmdb
+
+# Logs
+*.log

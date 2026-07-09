@@ -1,0 +1,8 @@
+# DEPRECATED — dùng infra/docker-compose.yml + app/docker-compose.yml thay thế
+#
+# Option A: infra tách riêng cho từng dự án portfolio
+#   ./infra-up.sh      → MongoDB + Redis + RabbitMQ
+#   ./app-deploy.sh    → microservices + frontend + nginx
+#   ./deploy.sh        → cả hai
+#
+# File này giữ lại để tham khảo. Không dùng trực tiếp.

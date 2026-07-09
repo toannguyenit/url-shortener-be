@@ -1,0 +1,159 @@
+services:
+  mongodb:
+    image: mongo:7
+    container_name: urlshortener-mongodb
+    environment:
+      MONGO_INITDB_DATABASE: urlshortener
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: urlshortener-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: urlshortener-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: auth-service/Dockerfile
+    container_name: urlshortener-auth
+    environment:
+      MONGO_HOST: mongodb
+      MONGO_PORT: 27017
+      MONGO_DB: urlshortener
+      JWT_SECRET: your-256-bit-secret-key-for-jwt-signing-must-be-long-enough
+    ports:
+      - "8081:8081"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  url-service:
+    build:
+      context: .
+      dockerfile: url-service/Dockerfile
+    container_name: urlshortener-url
+    environment:
+      MONGO_HOST: mongodb
+      MONGO_PORT: 27017
+      MONGO_DB: urlshortener
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: your-256-bit-secret-key-for-jwt-signing-must-be-long-enough
+      SHORT_URL_BASE: http://localhost:8083
+    ports:
+      - "8082:8082"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  redirect-service:
+    build:
+      context: .
+      dockerfile: redirect-service/Dockerfile
+    container_name: urlshortener-redirect
+    environment:
+      MONGO_HOST: mongodb
+      MONGO_PORT: 27017
+      MONGO_DB: urlshortener
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+    ports:
+      - "8083:8083"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: analytics-service/Dockerfile
+    container_name: urlshortener-analytics
+    environment:
+      MONGO_HOST: mongodb
+      MONGO_PORT: 27017
+      MONGO_DB: urlshortener
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      GEOIP_DB_PATH: /data/GeoLite2-City.mmdb
+    ports:
+      - "8084:8084"
+    volumes:
+      - ./data/geoip:/data:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    container_name: urlshortener-gateway
+    environment:
+      AUTH_SERVICE_HOST: auth-service
+      AUTH_SERVICE_PORT: 8081
+      URL_SERVICE_HOST: url-service
+      URL_SERVICE_PORT: 8082
+      ANALYTICS_SERVICE_HOST: analytics-service
+      ANALYTICS_SERVICE_PORT: 8084
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: your-256-bit-secret-key-for-jwt-signing-must-be-long-enough
+    ports:
+      - "8080:8080"
+    depends_on:
+      - auth-service
+      - url-service
+      - analytics-service
+      - redis
+
+  frontend:
+    build:
+      context: ../url-shortener-fe
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080
+        NEXT_PUBLIC_SHORT_URL_BASE: http://localhost:8083
+    container_name: urlshortener-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api-gateway
+
+volumes:
+  mongodata:

@@ -1,0 +1,37 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      routes:
+        - id: auth-service
+          uri: http://${AUTH_SERVICE_HOST:localhost}:${AUTH_SERVICE_PORT:8081}
+          predicates:
+            - Path=/api/auth/**
+        - id: url-service
+          uri: http://${URL_SERVICE_HOST:localhost}:${URL_SERVICE_PORT:8082}
+          predicates:
+            - Path=/api/urls/**
+        - id: analytics-service
+          uri: http://${ANALYTICS_SERVICE_HOST:localhost}:${ANALYTICS_SERVICE_PORT:8084}
+          predicates:
+            - Path=/api/analytics/**
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+jwt:
+  secret: ${JWT_SECRET:your-256-bit-secret-key-for-jwt-signing-must-be-long-enough}
+
+cors:
+  allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

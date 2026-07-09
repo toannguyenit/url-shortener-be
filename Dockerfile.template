@@ -1,0 +1,30 @@
+# Multi-stage Dockerfile for Spring Boot services
+# Usage: docker build -f <service>/Dockerfile .
+
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /app
+COPY pom.xml .
+COPY common/pom.xml common/
+COPY auth-service/pom.xml auth-service/
+COPY url-service/pom.xml url-service/
+COPY redirect-service/pom.xml redirect-service/
+COPY analytics-service/pom.xml analytics-service/
+COPY api-gateway/pom.xml api-gateway/
+RUN mvn dependency:go-offline -B
+
+COPY common common
+COPY auth-service auth-service
+COPY url-service url-service
+COPY redirect-service redirect-service
+COPY analytics-service analytics-service
+COPY api-gateway api-gateway
+
+ARG SERVICE_MODULE
+RUN mvn package -pl ${SERVICE_MODULE} -am -DskipTests -B
+
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+ARG JAR_FILE
+COPY --from=build /app/${JAR_FILE} app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]

@@ -1,0 +1,70 @@
+name: Build & Deploy Backend
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/url-shortener
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        service:
+          - name: auth
+            module: auth-service
+          - name: url
+            module: url-service
+          - name: redirect
+            module: redirect-service
+          - name: analytics
+            module: analytics-service
+          - name: gateway
+            module: api-gateway
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.service.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.service.module }}/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-${{ matrix.service.name }}:latest
+            ${{ env.IMAGE_PREFIX }}-${{ matrix.service.name }}:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/url-shortener
+            docker compose -f app/docker-compose.yml pull \
+              auth-service url-service redirect-service analytics-service api-gateway
+            docker compose -f app/docker-compose.yml up -d --remove-orphans \
+              auth-service url-service redirect-service analytics-service api-gateway
+            docker image prune -f
