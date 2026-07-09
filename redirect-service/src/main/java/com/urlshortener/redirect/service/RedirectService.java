@@ -41,38 +41,48 @@ public class RedirectService {
             }
         }
 
-        Optional<UrlMapping> mapping = urlMappingRepository.findByShortCodeAndDeletedFalse(shortCode);
-        if (mapping.isEmpty()) {
+        try {
+            Optional<UrlMapping> mapping = urlMappingRepository.findByShortCodeAndDeletedFalse(shortCode);
+            if (mapping.isEmpty()) {
+                return Optional.empty();
+            }
+
+            UrlMapping url = mapping.get();
+            CachedUrl cachedUrl = CachedUrl.builder()
+                    .id(url.getId())
+                    .longUrl(url.getLongUrl())
+                    .active(url.isActive())
+                    .expiresAt(url.getExpiresAt())
+                    .build();
+
+            try {
+                redisTemplate.opsForValue().set(cacheKey, objectMapper.writeValueAsString(cachedUrl), CACHE_TTL);
+            } catch (Exception e) {
+                log.warn("Failed to cache URL {}", shortCode);
+            }
+
+            return Optional.of(cachedUrl);
+        } catch (Exception e) {
+            log.error("Failed to resolve short code {} from database", shortCode, e);
             return Optional.empty();
         }
-
-        UrlMapping url = mapping.get();
-        CachedUrl cachedUrl = CachedUrl.builder()
-                .id(url.getId())
-                .longUrl(url.getLongUrl())
-                .active(url.isActive())
-                .expiresAt(url.getExpiresAt())
-                .build();
-
-        try {
-            redisTemplate.opsForValue().set(cacheKey, objectMapper.writeValueAsString(cachedUrl), CACHE_TTL);
-        } catch (Exception e) {
-            log.warn("Failed to cache URL {}", shortCode);
-        }
-
-        return Optional.of(cachedUrl);
     }
 
     public void publishClickEvent(CachedUrl url, String shortCode, String ip, String userAgent, String referrer) {
-        ClickEventMessage event = ClickEventMessage.builder()
-                .urlId(url.getId())
-                .shortCode(shortCode)
-                .ipAddress(ip)
-                .userAgent(userAgent)
-                .referrer(referrer)
-                .timestamp(Instant.now())
-                .build();
+        try {
+            ClickEventMessage event = ClickEventMessage.builder()
+                    .urlId(url.getId())
+                    .shortCode(shortCode)
+                    .ipAddress(ip)
+                    .userAgent(userAgent)
+                    .referrer(referrer)
+                    .timestamp(Instant.now())
+                    .build();
 
-        rabbitTemplate.convertAndSend(AppConfig.EXCHANGE, AppConfig.CLICK_ROUTING_KEY, event);
+            rabbitTemplate.convertAndSend(AppConfig.EXCHANGE, AppConfig.CLICK_ROUTING_KEY, event);
+        } catch (Exception e) {
+            // Analytics must not block redirects
+            log.error("Failed to publish click event for {}: {}", shortCode, e.getMessage());
+        }
     }
 }

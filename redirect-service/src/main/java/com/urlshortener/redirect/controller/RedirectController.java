@@ -31,6 +31,9 @@ public class RedirectController {
         }
 
         CachedUrl url = urlOpt.get();
+        if (url.getLongUrl() == null || url.getLongUrl().isBlank()) {
+            return ResponseEntity.status(HttpStatus.GONE).body("Invalid link target");
+        }
         if (!url.isActive() || (url.getExpiresAt() != null && Instant.now().isAfter(url.getExpiresAt()))) {
             return ResponseEntity.status(HttpStatus.GONE).body("This link has expired or been deactivated");
         }
