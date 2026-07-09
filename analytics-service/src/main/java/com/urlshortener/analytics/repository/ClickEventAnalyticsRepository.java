@@ -82,6 +82,15 @@ public class ClickEventAnalyticsRepository {
         );
     }
 
+    public long sumClickCountByUserId(UUID userId) {
+        Aggregation agg = Aggregation.newAggregation(
+                Aggregation.match(Criteria.where("userId").is(userId).and("deleted").is(false)),
+                Aggregation.group().sum("clickCount").as("total")
+        );
+        TotalCount result = mongoTemplate.aggregate(agg, "urls", TotalCount.class).getUniqueMappedResult();
+        return result != null ? result.getTotal() : 0L;
+    }
+
     @Data
     @NoArgsConstructor
     @AllArgsConstructor
@@ -114,7 +123,17 @@ public class ClickEventAnalyticsRepository {
         private String countryCode;
     }
 
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
     private static class UrlIdOnly {
         private UUID id;
+    }
+
+    @Data
+    @NoArgsConstructor
+    @AllArgsConstructor
+    public static class TotalCount {
+        private long total;
     }
 }

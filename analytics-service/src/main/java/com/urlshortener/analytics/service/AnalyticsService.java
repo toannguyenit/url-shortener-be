@@ -75,7 +75,7 @@ public class AnalyticsService {
                         url.getClickCount()))
                 .toList();
 
-        long totalClicks = topLinks.stream().mapToLong(TopLink::clickCount).sum();
+        long totalClicks = clickEventAnalyticsRepository.sumClickCountByUserId(userId);
 
         List<ClickByDay> clicksLast7Days = clickEventAnalyticsRepository.dashboardClicksByDay(userId, from).stream()
                 .filter(row -> row.getId() != null && !row.getId().isBlank())

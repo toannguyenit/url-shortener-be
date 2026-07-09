@@ -460,6 +460,7 @@ Xem [`deploy/PORTFOLIO.md`](deploy/PORTFOLIO.md).
 | CORS error | Sai `FRONTEND_URL` | Sửa `.env`, restart gateway |
 | RabbitMQ auth fail | Password `.env` ≠ lúc tạo infra | `rabbitmqctl authenticate_user` hoặc reset volume |
 | Analytics không có click | RabbitMQ lỗi nhưng redirect đã fix | Xem logs `urlshortener-analytics` |
+| Dashboard / Analytics **500** | `analytics-service` down (thường do RabbitMQ auth lúc startup) | `docker ps` + `docker logs urlshortener-analytics`; kiểm tra `RABBITMQ_PASSWORD` khớp infra; `pull` + `up -d analytics-service` |
 
 ---
 
