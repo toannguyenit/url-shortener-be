@@ -2,7 +2,9 @@
 
 Tài liệu triển khai đầy đủ cho **url-shortener-be** — Docker, Nginx, SSL, GHCR, CI/CD.
 
-**Repo liên quan:** [url-shortener-fe](https://github.com/toannguyenit/url-shortener-fe) (frontend deploy riêng, xem `DEPLOY.md` bên FE).
+**Repo liên quan:** [url-shortener-fe](https://github.com/toannguyenit/url-shortener-fe) | [ARCHITECTURE.md](./ARCHITECTURE.md) (kiến trúc full-stack)
+
+**Kiến trúc:** [ARCHITECTURE.md](./ARCHITECTURE.md) | **Deploy:** [DEPLOY.md](./DEPLOY.md) | **Local:** [STARTUP.md](./STARTUP.md)
 
 ---
 
@@ -174,18 +176,27 @@ chmod +x infra-up.sh app-deploy.sh deploy.sh
 
 > **Lưu ý:** Không copy nguyên chữ `<github-username>` — dùng username thật.
 
-### Cách 2 — rsync từ Mac
+Hoặc clone repo backend (**không** gõ nguyên chữ `<username>`):
 
 ```bash
-export VPS=root@<IP_VPS>
-ssh $VPS "mkdir -p /opt/url-shortener"
+cd /tmp
+git clone https://github.com/toannguyenit/url-shortener-be.git
+cp -r url-shortener-be/deploy/. /opt/url-shortener/
+```
+
+### Cách 2 — rsync từ Mac
+
+> macOS có thể chặn đọc `~/Documents` → lỗi `Operation not permitted`. Dùng **Cách 1** (clone trên VPS) hoặc nén folder bằng Finder rồi `scp`.
+
+```bash
+export VPS=root@103.252.93.178   # dùng $VPS, không gõ chữ IP_VPS
 
 rsync -avz --progress \
   /path/to/url-shortener-be/deploy/ \
   $VPS:/opt/url-shortener/
 ```
 
-> macOS có thể chặn đọc `~/Documents` → dùng clone trên VPS hoặc nén folder bằng Finder rồi `scp`.
+### Cách 3 — scp file zip (Mac bị chặn Documents)
 
 ---
 
@@ -234,6 +245,23 @@ sed -i \
 grep server_name nginx.conf
 ```
 
+### 6.3 RabbitMQ password (đọc kỹ)
+
+`RABBITMQ_PASSWORD` **do bạn tự đặt** trong `.env`. RabbitMQ chỉ lấy password **lần đầu** khi tạo volume.
+
+| Tình huống | Hành động |
+|------------|-----------|
+| Chưa chạy `./infra-up.sh` | Sửa `.env` → `./infra-up.sh` |
+| Đã chạy infra với password cũ | Dùng lại password cũ **hoặc** xóa volume `urlshortener-rabbitmqdata` rồi `./infra-up.sh` lại |
+
+Kiểm tra password khớp:
+
+```bash
+grep RABBITMQ /opt/url-shortener/.env
+docker exec urlshortener-redirect env | grep RABBIT
+docker exec urlshortener-rabbitmq rabbitmqctl authenticate_user urlshortener '<password>'
+```
+
 ---
 
 ## 7. SSL (Let's Encrypt)
@@ -276,20 +304,23 @@ Cert tự renew qua container `urlshortener-certbot` khi app chạy.
 
 ## 8. Build & push Docker images (GHCR)
 
-### 8.1 Push code GitHub
+### 8.1 Package visibility (quan trọng)
+
+> **Repo public ≠ Package public.** Đổi visibility repo trên GitHub **không** tự public Docker image.
+
+GitHub → **Packages** → từng package → **Package settings** → **Change visibility** → **Public**:
+
+- `url-shortener-auth`, `url-shortener-url`, `url-shortener-redirect`
+- `url-shortener-analytics`, `url-shortener-gateway`, `url-shortener-fe`
+
+### 8.3 Push code GitHub
 
 ```bash
 git remote add origin git@github.com:toannguyenit/url-shortener-be.git
 git push -u origin main
 ```
 
-### 8.2 Package visibility
-
-GitHub → **Packages** → mỗi image (`url-shortener-auth`, `url-shortener-url`, ...) → **Public**.
-
-> Repo public **không** tự làm package public — phải đổi riêng từng package.
-
-### 8.3 Images được build
+### 8.4 Images được build
 
 | Image GHCR | Dockerfile |
 |------------|------------|
@@ -301,7 +332,7 @@ GitHub → **Packages** → mỗi image (`url-shortener-auth`, `url-shortener-ur
 
 Push `main` → workflow `.github/workflows/deploy.yml` tự build.
 
-### 8.4 Login GHCR trên VPS (package private)
+### 8.5 Login GHCR trên VPS (package private)
 
 ```bash
 echo <GITHUB_PAT> | docker login ghcr.io -u toannguyenit --password-stdin
@@ -417,12 +448,18 @@ Xem [`deploy/PORTFOLIO.md`](deploy/PORTFOLIO.md).
 |--------|-------------|-----------|
 | `GHCR_OWNER variable is not set` | Thiếu `--env-file .env` | `docker compose --env-file .env -f app/...` |
 | `invalid reference format` `ghcr.io//url-...` | `GHCR_OWNER` trống | Sửa `.env`, thêm `--env-file` |
-| `403 Forbidden` pull image | Package private | Public package hoặc `docker login ghcr.io` |
-| Certbot `port 80 already in use` | nginx hệ thống | `systemctl stop nginx` |
+| `403 Forbidden` pull image | Package private | Public **từng** package GHCR (không chỉ repo) |
+| Certbot `port 80 already in use` | nginx hệ thống | `systemctl stop nginx && systemctl disable nginx` |
 | `missing server host` (Actions) | Thiếu `VPS_HOST` secret | Thêm Secrets trên GitHub |
-| FE "Cannot connect port 8080" | FE build sai API URL | Xem `DEPLOY.md` repo FE — rebuild image |
-| Short link 502 | redirect-service down | `docker logs urlshortener-redirect` |
+| `missing server host` + dùng `IP_VPS` literal | Gõ placeholder thay vì IP/`$VPS` | Dùng `root@103.252.93.178` hoặc `$VPS` |
+| FE "Cannot connect port 8080" | FE build sai API URL | Rebuild FE — xem `DEPLOY.md` repo FE |
+| Short link **500** | RabbitMQ publish lỗi (image cũ) | `pull redirect-service` image mới; kiểm tra `RABBITMQ_VHOST` |
+| Short link **404** | Code không tồn tại | Bình thường |
+| Short link **410** | Link hết hạn / inactive | Tạo link mới hoặc gia hạn |
+| Short link **502** | redirect-service down | `docker logs urlshortener-redirect` |
 | CORS error | Sai `FRONTEND_URL` | Sửa `.env`, restart gateway |
+| RabbitMQ auth fail | Password `.env` ≠ lúc tạo infra | `rabbitmqctl authenticate_user` hoặc reset volume |
+| Analytics không có click | RabbitMQ lỗi nhưng redirect đã fix | Xem logs `urlshortener-analytics` |
 
 ---
 

@@ -2,7 +2,7 @@
 
 Microservices-based URL shortener backend built with Spring Boot 3.4, Java 21, and MongoDB.
 
-Chi tiết đầy đủ: **[DEPLOY.md](./DEPLOY.md)** (production VPS) | Local: **[STARTUP.md](./STARTUP.md)** | Portfolio: **[deploy/PORTFOLIO.md](./deploy/PORTFOLIO.md)**
+Chi tiết đầy đủ: **[ARCHITECTURE.md](./ARCHITECTURE.md)** | **[DEPLOY.md](./DEPLOY.md)** (production VPS) | Local: **[STARTUP.md](./STARTUP.md)** | Portfolio: **[deploy/PORTFOLIO.md](./deploy/PORTFOLIO.md)**
 
 ## Quick Start
 
