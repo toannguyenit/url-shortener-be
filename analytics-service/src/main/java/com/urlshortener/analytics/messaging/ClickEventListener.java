@@ -19,6 +19,7 @@ public class ClickEventListener {
     @RabbitListener(queues = "click.events")
     public void handleClickEvent(ClickEventMessage message) {
         try {
+            log.info("Received click event for shortCode={}", message.getShortCode());
             clickEventConsumer.process(message);
         } catch (Exception e) {
             log.error("Failed to process click event: {}", e.getMessage());

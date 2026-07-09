@@ -10,12 +10,17 @@ import com.urlshortener.redirect.repository.UrlMappingRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -28,6 +33,7 @@ public class RedirectService {
     private final StringRedisTemplate redisTemplate;
     private final UrlMappingRepository urlMappingRepository;
     private final RabbitTemplate rabbitTemplate;
+    private final MongoTemplate mongoTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
 
     public Optional<CachedUrl> resolve(String shortCode) {
@@ -80,9 +86,26 @@ public class RedirectService {
                     .build();
 
             rabbitTemplate.convertAndSend(AppConfig.EXCHANGE, AppConfig.CLICK_ROUTING_KEY, event);
+            log.debug("Published click event for {}", shortCode);
         } catch (Exception e) {
-            // Analytics must not block redirects
             log.error("Failed to publish click event for {}: {}", shortCode, e.getMessage());
+            incrementClickCountFallback(url.getId());
+        }
+    }
+
+    /** Fallback when RabbitMQ is unavailable — keeps clickCount in sync for the links table */
+    private void incrementClickCountFallback(UUID urlId) {
+        if (urlId == null) {
+            return;
+        }
+        try {
+            mongoTemplate.updateFirst(
+                    Query.query(Criteria.where("_id").is(urlId)),
+                    new Update().inc("clickCount", 1),
+                    "urls"
+            );
+        } catch (Exception e) {
+            log.warn("Failed to increment click count for {}: {}", urlId, e.getMessage());
         }
     }
 }

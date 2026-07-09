@@ -31,6 +31,7 @@ public class AnalyticsService {
         long totalClicks = clickEventRepository.countByUrlId(urlId);
 
         List<ClickByDay> clicksByDay = clickEventAnalyticsRepository.countClicksByDay(urlId, from, to).stream()
+                .filter(row -> row.getId() != null && !row.getId().isBlank())
                 .map(row -> new ClickByDay(LocalDate.parse(row.getId()), row.getCount()))
                 .toList();
 
@@ -77,6 +78,7 @@ public class AnalyticsService {
         long totalClicks = topLinks.stream().mapToLong(TopLink::clickCount).sum();
 
         List<ClickByDay> clicksLast7Days = clickEventAnalyticsRepository.dashboardClicksByDay(userId, from).stream()
+                .filter(row -> row.getId() != null && !row.getId().isBlank())
                 .map(row -> new ClickByDay(LocalDate.parse(row.getId()), row.getCount()))
                 .toList();
 
