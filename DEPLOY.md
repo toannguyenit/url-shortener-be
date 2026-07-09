@@ -1,429 +1,456 @@
-# Hướng dẫn Deploy lên VPS + CI/CD tự động
+# Hướng dẫn Deploy Backend lên VPS (Production)
 
-Tài liệu triển khai production cho URL Shortener với **Docker**, **Nginx**, **Let's Encrypt SSL**, và **GitHub Actions**.
+Tài liệu triển khai đầy đủ cho **url-shortener-be** — Docker, Nginx, SSL, GHCR, CI/CD.
 
-> **Portfolio (Option A):** Infra (MongoDB, Redis, RabbitMQ) tách riêng khỏi app — mỗi dự án portfolio có stack riêng, không share data. Xem thêm [`deploy/PORTFOLIO.md`](deploy/PORTFOLIO.md).
+**Repo liên quan:** [url-shortener-fe](https://github.com/toannguyenit/url-shortener-fe) (frontend deploy riêng, xem `DEPLOY.md` bên FE).
 
-## Kiến trúc Production
+---
+
+## Mục lục
+
+1. [Kiến trúc production](#1-kiến-trúc-production)
+2. [Yêu cầu](#2-yêu-cầu)
+3. [Cấu hình DNS](#3-cấu-hình-dns)
+4. [Chuẩn bị VPS](#4-chuẩn-bị-vps)
+5. [Copy file deploy lên VPS](#5-copy-file-deploy-lên-vps)
+6. [Cấu hình `.env` và Nginx](#6-cấu-hình-env-và-nginx)
+7. [SSL (Let's Encrypt)](#7-ssl-lets-encrypt)
+8. [Build & push Docker images (GHCR)](#8-build--push-docker-images-ghcr)
+9. [Khởi động lần đầu](#9-khởi-động-lần-đầu)
+10. [CI/CD tự động (GitHub Actions)](#10-cicd-tự-động-github-actions)
+11. [Vận hành hàng ngày](#11-vận-hành-hàng-ngày)
+12. [Portfolio — nhiều dự án trên 1 VPS](#12-portfolio--nhiều-dự-án-trên-1-vps)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Checklist go-live](#14-checklist-go-live)
+
+---
+
+## 1. Kiến trúc production
+
+### URL production (ví dụ thực tế)
+
+| Subdomain | Service | URL |
+|-----------|---------|-----|
+| Dashboard (FE) | Next.js | `https://urlshort.toannguyenit.cloud` |
+| API Gateway | Spring Boot | `https://api-urlshort.toannguyenit.cloud` |
+| Short link | redirect-service | `https://go-urlshort.toannguyenit.cloud/{code}` |
+
+### Sơ đồ
 
 ```
 Internet
     │
     ▼
-┌─────────────────────────────────────────┐
-│  VPS (Ubuntu 22.04+)                    │
-│  Nginx :443                             │
-│    ├── yourdomain.com      → Frontend   │
-│    ├── api.yourdomain.com  → Gateway    │
-│    └── s.yourdomain.com    → Redirect   │
-│                                         │
-│  /opt/url-shortener/                    │
-│    infra/  → MongoDB, Redis, RabbitMQ   │
-│              (network: urlshortener-net)│
-│    app/    → microservices + FE + nginx │
-└─────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│  VPS Ubuntu 22.04                                  │
+│                                                    │
+│  nginx (container) :80 / :443                      │
+│    ├── urlshort.*        → frontend:3000           │
+│    ├── api-urlshort.*    → api-gateway:8080      │
+│    └── go-urlshort.*     → redirect-service:8083  │
+│                                                    │
+│  /opt/url-shortener/                               │
+│    infra/  → MongoDB, Redis, RabbitMQ              │
+│              network: urlshortener-net             │
+│    app/    → 5 microservices + FE + nginx          │
+└──────────────────────────────────────────────────┘
 ```
 
-| Subdomain | Service | Mục đích |
-|-----------|---------|----------|
-| `yourdomain.com` | Frontend | Dashboard, đăng nhập |
-| `api.yourdomain.com` | API Gateway | REST API |
-| `s.yourdomain.com` | Redirect | Short link `s.yourdomain.com/abc123` |
+### Microservices (backend)
+
+| Service | Port nội bộ | Vai trò |
+|---------|-------------|---------|
+| api-gateway | 8080 | JWT, CORS, rate limit, routing |
+| auth-service | 8081 | Đăng ký, đăng nhập |
+| url-service | 8082 | CRUD link, QR code |
+| redirect-service | 8083 | Redirect 302, Redis cache, RabbitMQ publish |
+| analytics-service | 8084 | Consumer RabbitMQ, GeoIP, dashboard API |
+
+### Option A — Infra tách riêng (portfolio)
+
+MongoDB, Redis, RabbitMQ **không share** với dự án khác. Chi tiết: [`deploy/PORTFOLIO.md`](deploy/PORTFOLIO.md).
 
 ### Cấu trúc thư mục trên VPS
 
 ```
 /opt/url-shortener/
-├── .env
-├── infra/
-│   └── docker-compose.yml    # MongoDB, Redis, RabbitMQ
-├── app/
-│   └── docker-compose.yml    # 5 services + frontend + nginx
+├── .env                          # Secrets + domain (KHÔNG commit)
+├── infra/docker-compose.yml      # MongoDB, Redis, RabbitMQ
+├── app/docker-compose.yml        # Microservices + FE + nginx
 ├── nginx/nginx.conf
-├── certbot/
-├── data/geoip/
-├── infra-up.sh               # Khởi động infra (1 lần)
-├── app-deploy.sh             # Deploy app (CI/CD chạy bước này)
-└── deploy.sh                 # Infra + app
+├── certbot/conf/                 # SSL certificates
+├── certbot/www/
+├── data/geoip/                   # GeoLite2 (tùy chọn)
+├── infra-up.sh
+├── app-deploy.sh
+└── deploy.sh
 ```
 
 ---
 
-## Phần 1: Chuẩn bị VPS
-
-### 1.1 Yêu cầu tối thiểu
+## 2. Yêu cầu
 
 | Resource | Khuyến nghị |
 |----------|-------------|
 | CPU | 2 vCPU |
-| RAM | 4 GB |
-| Disk | 40 GB SSD |
+| RAM | 8 GB (microservices + MongoDB + Redis) |
+| Disk | 40–60 GB SSD |
 | OS | Ubuntu 22.04 LTS |
+| Domain | 3 subdomain (hoặc dùng pattern `api-{project}`, `go-{project}`) |
 
-### 1.2 Trỏ DNS
+---
 
-Tạo A record trỏ về IP VPS:
+## 3. Cấu hình DNS
 
-```
-yourdomain.com       → 1.2.3.4
-api.yourdomain.com   → 1.2.3.4
-s.yourdomain.com     → 1.2.3.4
-```
+Tại panel DNS (Cloudflare, Namecheap, ...), tạo **bản ghi A** trỏ về **IP VPS**:
 
-### 1.3 Cài đặt Docker trên VPS
+| Type | Host / Name | Value |
+|------|-------------|-------|
+| A | `urlshort` | `103.252.93.178` |
+| A | `api-urlshort` | `103.252.93.178` |
+| A | `go-urlshort` | `103.252.93.178` |
+
+> Thay IP bằng IP VPS thật. Host chỉ gõ phần subdomain, **không** gõ full domain.
+
+Kiểm tra sau 5–30 phút:
 
 ```bash
-# SSH vào VPS
-ssh root@1.2.3.4
+dig +short urlshort.toannguyenit.cloud
+dig +short api-urlshort.toannguyenit.cloud
+dig +short go-urlshort.toannguyenit.cloud
+```
 
-# Cài Docker
+**Cloudflare:** tắt proxy (mây xám) khi lấy SSL lần đầu bằng certbot standalone.
+
+---
+
+## 4. Chuẩn bị VPS
+
+### 4.1 Cài Docker
+
+```bash
+ssh root@<IP_VPS>
+
 curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
+apt update && apt install -y docker-compose-plugin
 
-# Cài Docker Compose plugin
-sudo apt update && sudo apt install -y docker-compose-plugin
-
-# Kiểm tra
 docker --version
 docker compose version
 ```
 
-### 1.4 Tạo thư mục deploy
+### 4.2 Tạo thư mục
 
 ```bash
-sudo mkdir -p /opt/url-shortener/{infra,app,nginx,certbot/conf,certbot/www,data/geoip}
-sudo chown -R $USER:$USER /opt/url-shortener
+mkdir -p /opt/url-shortener/{certbot/conf,certbot/www,data/geoip}
 ```
 
-### 1.5 Copy file cấu hình lên VPS
-
-Từ máy local:
+### 4.3 Firewall
 
 ```bash
-scp -r deploy/* user@1.2.3.4:/opt/url-shortener/
+ufw allow 22/tcp
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw enable
 ```
 
-Hoặc clone repo backend:
+**Không mở** port 27017, 6379, 8080–8084 ra internet.
+
+---
+
+## 5. Copy file deploy lên VPS
+
+### Cách 1 — Clone từ GitHub (khuyến nghị)
+
+Trên VPS:
 
 ```bash
+cd /tmp
+git clone https://github.com/toannguyenit/url-shortener-be.git
+cp -r url-shortener-be/deploy/. /opt/url-shortener/
 cd /opt/url-shortener
-git clone https://github.com/<username>/url-shortener-be.git .
-cp deploy/.env.example .env
+cp .env.example .env
+chmod +x infra-up.sh app-deploy.sh deploy.sh
 ```
 
-### 1.6 Cấu hình `.env` trên VPS
+> **Lưu ý:** Không copy nguyên chữ `<github-username>` — dùng username thật.
+
+### Cách 2 — rsync từ Mac
+
+```bash
+export VPS=root@<IP_VPS>
+ssh $VPS "mkdir -p /opt/url-shortener"
+
+rsync -avz --progress \
+  /path/to/url-shortener-be/deploy/ \
+  $VPS:/opt/url-shortener/
+```
+
+> macOS có thể chặn đọc `~/Documents` → dùng clone trên VPS hoặc nén folder bằng Finder rồi `scp`.
+
+---
+
+## 6. Cấu hình `.env` và Nginx
+
+### 6.1 File `.env`
 
 ```bash
 nano /opt/url-shortener/.env
 ```
 
 ```env
-DOMAIN=yourdomain.com
-API_URL=https://api.yourdomain.com
-SHORT_URL_BASE=https://s.yourdomain.com
-FRONTEND_URL=https://yourdomain.com
+# Domain
+DOMAIN=urlshort.toannguyenit.cloud
+API_URL=https://api-urlshort.toannguyenit.cloud
+SHORT_URL_BASE=https://go-urlshort.toannguyenit.cloud
+FRONTEND_URL=https://urlshort.toannguyenit.cloud
 
-JWT_SECRET=<chạy: openssl rand -base64 48>
-GHCR_OWNER=<github-username>
+# Secrets
+JWT_SECRET=<openssl rand -base64 48>
+GHCR_OWNER=toannguyenit
 IMAGE_TAG=latest
 
+# Database
 MONGO_DB=urlshortener
+
+# RabbitMQ
 RABBITMQ_USER=urlshortener
 RABBITMQ_PASSWORD=<password-mạnh>
 RABBITMQ_VHOST=urlshortener
 ```
 
-### 1.7 Sửa Nginx config
+`FRONTEND_URL` được map sang `CORS_ALLOWED_ORIGINS` cho api-gateway.
+
+### 6.2 Nginx
 
 ```bash
-nano /opt/url-shortener/nginx/nginx.conf
+cd /opt/url-shortener/nginx
+
+sed -i \
+  -e 's/yourdomain\.com/urlshort.toannguyenit.cloud/g' \
+  -e 's/api\.urlshort\.toannguyenit\.cloud/api-urlshort.toannguyenit.cloud/g' \
+  -e 's/s\.urlshort\.toannguyenit\.cloud/go-urlshort.toannguyenit.cloud/g' \
+  nginx.conf
+
+grep server_name nginx.conf
 ```
 
-Thay tất cả `yourdomain.com` bằng domain thật của bạn.
+---
 
-### 1.8 SSL với Let's Encrypt (lần đầu)
+## 7. SSL (Let's Encrypt)
+
+### Tắt nginx hệ thống (nếu chiếm port 80)
+
+```bash
+systemctl stop nginx
+systemctl disable nginx
+ss -tlnp | grep ':80 '   # không có output = OK
+```
+
+### Lấy certificate
 
 ```bash
 cd /opt/url-shortener
 
-# Tạm dừng nginx nếu đang chạy
-docker compose -f app/docker-compose.yml stop nginx 2>/dev/null || true
-
-# Lấy certificate (thay email và domain)
 docker run -it --rm \
   -v "$(pwd)/certbot/conf:/etc/letsencrypt" \
   -v "$(pwd)/certbot/www:/var/www/certbot" \
   -p 80:80 \
   certbot/certbot certonly --standalone \
-  --email your@email.com \
+  --email toannguyenit@gmail.com \
   --agree-tos \
   --no-eff-email \
-  -d yourdomain.com \
-  -d api.yourdomain.com \
-  -d s.yourdomain.com
+  -d urlshort.toannguyenit.cloud \
+  -d api-urlshort.toannguyenit.cloud \
+  -d go-urlshort.toannguyenit.cloud
+```
+
+Kiểm tra:
+
+```bash
+ls certbot/conf/live/urlshort.toannguyenit.cloud/
+```
+
+Cert tự renew qua container `urlshortener-certbot` khi app chạy.
+
+---
+
+## 8. Build & push Docker images (GHCR)
+
+### 8.1 Push code GitHub
+
+```bash
+git remote add origin git@github.com:toannguyenit/url-shortener-be.git
+git push -u origin main
+```
+
+### 8.2 Package visibility
+
+GitHub → **Packages** → mỗi image (`url-shortener-auth`, `url-shortener-url`, ...) → **Public**.
+
+> Repo public **không** tự làm package public — phải đổi riêng từng package.
+
+### 8.3 Images được build
+
+| Image GHCR | Dockerfile |
+|------------|------------|
+| `ghcr.io/toannguyenit/url-shortener-auth` | `auth-service/Dockerfile` |
+| `ghcr.io/toannguyenit/url-shortener-url` | `url-service/Dockerfile` |
+| `ghcr.io/toannguyenit/url-shortener-redirect` | `redirect-service/Dockerfile` |
+| `ghcr.io/toannguyenit/url-shortener-analytics` | `analytics-service/Dockerfile` |
+| `ghcr.io/toannguyenit/url-shortener-gateway` | `api-gateway/Dockerfile` |
+
+Push `main` → workflow `.github/workflows/deploy.yml` tự build.
+
+### 8.4 Login GHCR trên VPS (package private)
+
+```bash
+echo <GITHUB_PAT> | docker login ghcr.io -u toannguyenit --password-stdin
 ```
 
 ---
 
-## Phần 2: Push Docker Images lên GitHub Container Registry
-
-### 2.1 Đẩy code lên GitHub
-
-```bash
-# Repo backend
-cd url-shortener-be
-git init && git remote add origin git@github.com:<username>/url-shortener-be.git
-git add . && git commit -m "Initial backend"
-git push -u origin main
-
-# Repo frontend
-cd url-shortener-fe
-git init && git remote add origin git@github.com:<username>/url-shortener-fe.git
-git add . && git commit -m "Initial frontend"
-git push -u origin main
-```
-
-### 2.2 Cho phép VPS pull image từ GHCR
-
-Trên GitHub: **Settings → Packages** → đặt package visibility là **Public** (hoặc dùng PAT).
-
-Trên VPS, login GHCR (nếu package private):
-
-```bash
-echo <GITHUB_PAT> | docker login ghcr.io -u <username> --password-stdin
-```
-
-### 2.3 Build image lần đầu (manual hoặc qua CI)
-
-Push lên `main` → GitHub Actions tự build. Hoặc build local:
-
-```bash
-# Backend — từng service
-docker build -f auth-service/Dockerfile -t ghcr.io/<user>/url-shortener-auth:latest .
-docker push ghcr.io/<user>/url-shortener-auth:latest
-# ... lặp cho url, redirect, analytics, gateway
-
-# Frontend
-cd url-shortener-fe
-docker build \
-  --build-arg NEXT_PUBLIC_API_URL=https://api.yourdomain.com \
-  --build-arg NEXT_PUBLIC_SHORT_URL_BASE=https://s.yourdomain.com \
-  -t ghcr.io/<user>/url-shortener-fe:latest .
-docker push ghcr.io/<user>/url-shortener-fe:latest
-```
-
-### 2.4 Khởi động lần đầu trên VPS
+## 9. Khởi động lần đầu
 
 ```bash
 cd /opt/url-shortener
-chmod +x infra-up.sh app-deploy.sh deploy.sh
 
-# Bước 1: Infra (MongoDB, Redis, RabbitMQ) — chạy 1 lần
+# 1. Infra — chạy 1 lần (hoặc khi restart DB)
 ./infra-up.sh
 
-# Bước 2: App (kéo image + khởi động services)
-docker compose -f app/docker-compose.yml pull
+# 2. Pull + chạy app (LUÔN dùng --env-file)
+docker compose --env-file .env -f app/docker-compose.yml pull
 ./app-deploy.sh
 
-# Kiểm tra
-docker compose -f infra/docker-compose.yml ps
-docker compose -f app/docker-compose.yml ps
+# 3. Kiểm tra
+docker compose --env-file .env -f infra/docker-compose.yml ps
+docker compose --env-file .env -f app/docker-compose.yml ps
 ```
 
-> **Lưu ý:** Infra không redeploy mỗi lần push code. CI/CD chỉ cập nhật `app/docker-compose.yml`.
+> **Quan trọng:** `docker compose -f app/docker-compose.yml` **không** tự đọc `.env` ở thư mục cha. Luôn thêm `--env-file .env`.
+
+### Test
+
+```bash
+curl -s https://api-urlshort.toannguyenit.cloud/actuator/health
+# {"status":"UP",...}
+```
 
 ---
 
-## Phần 3: CI/CD tự động (GitHub Actions)
+## 10. CI/CD tự động (GitHub Actions)
 
-### 3.1 Luồng CI/CD
+### Luồng
 
-```mermaid
-flowchart LR
-    Dev[Push_to_main] --> GHA[GitHub_Actions]
-    GHA --> Build[Build_Docker_image]
-    Build --> GHCR[Push_to_GHCR]
-    GHCR --> SSH[SSH_to_VPS]
-    SSH --> Pull[docker_compose_pull]
-    Pull --> Up[docker_compose_up]
+```
+push main → build 5 BE images → push GHCR → SSH VPS → pull + up services
 ```
 
-| Repo | Trigger | Hành động |
-|------|---------|-----------|
-| `url-shortener-be` | push `main` | Build 5 BE images → deploy lên VPS |
-| `url-shortener-fe` | push `main` | Build FE image → deploy lên VPS |
+Workflow: `.github/workflows/deploy.yml`
 
-Workflow files đã có sẵn:
-- `url-shortener-be/.github/workflows/deploy.yml`
-- `url-shortener-fe/.github/workflows/deploy.yml`
+### GitHub Secrets (repo url-shortener-be)
 
-### 3.2 Cấu hình GitHub Secrets
-
-Vào **GitHub repo → Settings → Secrets and variables → Actions**
-
-**Secrets (cả 2 repo):**
+**Settings → Secrets and variables → Actions → Secrets**
 
 | Secret | Ví dụ | Mô tả |
 |--------|-------|-------|
-| `VPS_HOST` | `1.2.3.4` | IP hoặc domain VPS |
-| `VPS_USER` | `ubuntu` | User SSH |
-| `VPS_SSH_KEY` | `-----BEGIN OPENSSH...` | Private key SSH |
+| `VPS_HOST` | `103.252.93.178` | IP VPS |
+| `VPS_USER` | `root` | User SSH |
+| `VPS_PASSWORD` | `***` | Mật khẩu SSH |
 
-**Variables (repo frontend):**
-
-| Variable | Ví dụ |
-|----------|-------|
-| `API_URL` | `https://api.yourdomain.com` |
-| `SHORT_URL_BASE` | `https://s.yourdomain.com` |
-
-### 3.3 Tạo SSH key cho CI/CD
-
-Trên máy local:
+### Bật login password trên VPS (nếu cần)
 
 ```bash
-ssh-keygen -t ed25519 -C "github-actions" -f ~/.ssh/vps_deploy -N ""
+grep PasswordAuthentication /etc/ssh/sshd_config
+# Phải là yes
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+systemctl restart sshd
 ```
 
-```bash
-# Copy public key lên VPS
-ssh-copy-id -i ~/.ssh/vps_deploy.pub ubuntu@1.2.3.4
-
-# Copy private key vào GitHub Secret VPS_SSH_KEY
-cat ~/.ssh/vps_deploy
-```
-
-### 3.4 Kiểm tra CI/CD
-
-```bash
-# Sửa code → push
-git add . && git commit -m "test deploy" && git push origin main
-```
-
-Vào **GitHub → Actions** tab xem workflow chạy. Sau ~5 phút:
-
-```bash
-# Trên VPS
-docker compose -f /opt/url-shortener/app/docker-compose.yml ps
-```
-
----
-
-## Phần 4: Cập nhật CORS cho Production
-
-Sửa `api-gateway` để cho phép domain production. File `application.yml`:
-
-```yaml
-# Thêm vào api-gateway hoặc dùng env SPRING_APPLICATION_JSON
-```
-
-Hoặc sửa `CorsConfig.java` thêm origin:
-
-```java
-config.setAllowedOrigins(List.of(
-    "http://localhost:3000",
-    "https://yourdomain.com"
-));
-```
-
-Rebuild và deploy lại gateway.
-
----
-
-## Phần 5: Vận hành
-
-### Lệnh thường dùng
+### Deploy thủ công sau push
 
 ```bash
 cd /opt/url-shortener
+./app-deploy.sh
+```
 
-# Xem logs
-docker compose -f app/docker-compose.yml logs -f api-gateway
-docker compose -f app/docker-compose.yml logs -f redirect-service
+---
+
+## 11. Vận hành hàng ngày
+
+```bash
+cd /opt/url-shortener
+COMPOSE="docker compose --env-file .env -f app/docker-compose.yml"
+
+# Logs
+$COMPOSE logs -f api-gateway
+$COMPOSE logs -f redirect-service
 
 # Restart 1 service
-docker compose -f app/docker-compose.yml restart url-service
+$COMPOSE restart url-service
 
-# Deploy thủ công (kéo image mới)
+# Deploy image mới
 ./app-deploy.sh
-
-# Restart infra (hiếm khi cần)
-docker compose -f infra/docker-compose.yml restart
 
 # Backup MongoDB
 docker exec urlshortener-mongodb mongodump --db urlshortener --out /data/db/backup
 docker cp urlshortener-mongodb:/data/db/backup ./backup-$(date +%Y%m%d)
 ```
 
-### Nhiều dự án portfolio trên cùng VPS
+---
 
-Mỗi dự án đặt trong `/opt/<tên-dự-án>/` với infra riêng:
+## 12. Portfolio — nhiều dự án trên 1 VPS
 
-| Dự án | Network | MongoDB container |
-|-------|---------|-------------------|
-| url-shortener | `urlshortener-net` | `urlshortener-mongodb` |
-| blog-app (ví dụ) | `blog-net` | `blog-mongodb` |
+Mỗi dự án: `/opt/<tên-dự-án>/` với network + DB riêng.
 
-Chi tiết: [`deploy/PORTFOLIO.md`](deploy/PORTFOLIO.md).
-
-### Monitoring cơ bản
-
-```bash
-# Health check
-curl https://api.yourdomain.com/actuator/health
-
-# Test redirect
-curl -I https://s.yourdomain.com/<shortCode>
+```
+urlshort.toannguyenit.cloud      → /opt/url-shortener/
+blog.toannguyenit.cloud          → /opt/blog-app/     (sau này)
 ```
 
-### Firewall (UFW)
-
-```bash
-sudo ufw allow 22/tcp    # SSH
-sudo ufw allow 80/tcp    # HTTP (Let's Encrypt)
-sudo ufw allow 443/tcp   # HTTPS
-sudo ufw enable
-```
-
-**Không mở** port 27017, 6379, 8080-8084 ra internet — chỉ Nginx public.
+Xem [`deploy/PORTFOLIO.md`](deploy/PORTFOLIO.md).
 
 ---
 
-## Phần 6: Checklist trước go-live
+## 13. Troubleshooting
 
-- [ ] DNS A record trỏ đúng IP VPS
-- [ ] SSL certificate hoạt động (https không báo lỗi)
-- [ ] `.env` trên VPS có `JWT_SECRET` mạnh, không dùng default
-- [ ] `SHORT_URL_BASE` = `https://s.yourdomain.com`
-- [ ] `NEXT_PUBLIC_API_URL` build đúng trong FE image
-- [ ] CORS gateway cho phép `https://yourdomain.com`
-- [ ] GitHub Actions secrets đã cấu hình
-- [ ] Test: đăng ký → tạo link → mở short link → xem analytics
-- [ ] MongoDB backup schedule (cron weekly)
-
----
-
-## Troubleshooting
-
-| Vấn đề | Giải pháp |
-|--------|-----------|
-| CI/CD SSH failed | Kiểm tra `VPS_SSH_KEY`, firewall port 22 |
-| `pull access denied` GHCR | `docker login ghcr.io` trên VPS hoặc set package public |
-| FE gọi API lỗi CORS | Thêm domain vào `CorsConfig` gateway |
-| Short link 502 | Kiểm tra `redirect-service` logs, `SHORT_URL_BASE` |
-| SSL expired | Certbot container tự renew; kiểm tra `certbot renew` |
-| Out of memory | Tăng RAM VPS hoặc giới hạn MongoDB cache |
+| Vấn đề | Nguyên nhân | Giải pháp |
+|--------|-------------|-----------|
+| `GHCR_OWNER variable is not set` | Thiếu `--env-file .env` | `docker compose --env-file .env -f app/...` |
+| `invalid reference format` `ghcr.io//url-...` | `GHCR_OWNER` trống | Sửa `.env`, thêm `--env-file` |
+| `403 Forbidden` pull image | Package private | Public package hoặc `docker login ghcr.io` |
+| Certbot `port 80 already in use` | nginx hệ thống | `systemctl stop nginx` |
+| `missing server host` (Actions) | Thiếu `VPS_HOST` secret | Thêm Secrets trên GitHub |
+| FE "Cannot connect port 8080" | FE build sai API URL | Xem `DEPLOY.md` repo FE — rebuild image |
+| Short link 502 | redirect-service down | `docker logs urlshortener-redirect` |
+| CORS error | Sai `FRONTEND_URL` | Sửa `.env`, restart gateway |
 
 ---
 
-## Tóm tắt nhanh
+## 14. Checklist go-live
+
+- [ ] DNS 3 subdomain → IP VPS
+- [ ] `.env` đầy đủ (`JWT_SECRET`, `GHCR_OWNER`, `FRONTEND_URL`)
+- [ ] `nginx.conf` đúng domain
+- [ ] SSL certificate OK
+- [ ] `./infra-up.sh` healthy
+- [ ] 6 GHCR packages public (5 BE + 1 FE)
+- [ ] GitHub Secrets: `VPS_HOST`, `VPS_USER`, `VPS_PASSWORD`
+- [ ] FE image build với `NEXT_PUBLIC_API_URL` production
+- [ ] Test: đăng ký → tạo link → mở `go-urlshort.../code` → analytics
+
+---
+
+## Tóm tắt lệnh (copy nhanh)
 
 ```bash
-# 1. Setup VPS + Docker + DNS + SSL
-# 2. Copy deploy/ lên /opt/url-shortener, sửa .env + nginx.conf
-# 3. ./infra-up.sh          → MongoDB + Redis + RabbitMQ
-# 4. Push code GitHub, cấu hình Secrets
-# 5. ./app-deploy.sh        → hoặc push main → CI/CD tự deploy app
-# 6. Truy cập https://yourdomain.com
+# Trên VPS — lần đầu
+cd /tmp && git clone https://github.com/toannguyenit/url-shortener-be.git
+cp -r url-shortener-be/deploy/. /opt/url-shortener/
+cd /opt/url-shortener && cp .env.example .env && nano .env
+# sửa nginx, certbot, rồi:
+./infra-up.sh
+docker compose --env-file .env -f app/docker-compose.yml pull
+./app-deploy.sh
 ```
 
-Mỗi lần push code lên `main`, CI/CD chỉ build image mới và deploy **app** lên VPS (~5–10 phút). Infra giữ nguyên.
+Mỗi lần push `main` (BE): CI/CD build 5 services → deploy app. **Infra không redeploy.**
