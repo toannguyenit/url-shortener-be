@@ -10,15 +10,17 @@ if ! docker network inspect urlshortener-net >/dev/null 2>&1; then
   exit 1
 fi
 
+COMPOSE="docker compose --env-file .env -f app/docker-compose.yml"
+
 echo "==> Pulling latest app images..."
-docker compose -f app/docker-compose.yml pull \
+$COMPOSE pull \
   auth-service url-service redirect-service analytics-service api-gateway frontend
 
 echo "==> Starting application services..."
-docker compose -f app/docker-compose.yml up -d --remove-orphans
+$COMPOSE up -d --remove-orphans
 
 echo "==> Pruning old images..."
 docker image prune -f
 
 echo "==> App deploy complete!"
-docker compose -f app/docker-compose.yml ps
+$COMPOSE ps
